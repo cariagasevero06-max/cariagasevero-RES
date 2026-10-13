@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --background: #FAF7F2;
+  --foreground: #2C2523;
+  --cream-50: #FDFCFA;
+  --cream-100: #F7F3EB;
+  --cream-200: #EFE8DC;
+  --cream-300: #E2D7C5;
+  --cream-border: #E8E0D5;
+  --espresso-900: #1D1816;
+  --espresso-800: #2C2523;
+  --espresso-600: #4B413C;
+  --espresso-400: #786C65;
+  --terracotta-600: #B85032;
+  --terracotta-500: #CC5B39;
+  --terracotta-100: #FAEBE5;
+  --sage-700: #2D583B;
+  --sage-600: #3D6F4B;
+  --sage-100: #EBF3ED;
+  --amber-700: #9E5F0E;
+  --amber-600: #C27A19;
+  --amber-100: #FCF4E3;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar for boutique aesthetic */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F5EFEB;
+}
+::-webkit-scrollbar-thumb {
+  background: #D8CEBE;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #C2B5A3;
+}
+
+/* Smooth subtle transitions */
+.transition-smooth {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
