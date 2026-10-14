@@ -24,8 +24,21 @@ function PortalApp() {
 
   // Cross-module states
   const [showActivationModal, setShowActivationModal] = useState(false);
+  const [verifiedEmailParam, setVerifiedEmailParam] = useState('');
   const [openedAnnouncement, setOpenedAnnouncement] = useState<Announcement | null>(null);
   const [openCreateTaskDirectly, setOpenCreateTaskDirectly] = useState(false);
+
+  // Detect verification redirect from Gmail activation link
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const isVerified = params.get('verified') === 'true';
+    const email = params.get('email') || '';
+    if (isVerified) {
+      setVerifiedEmailParam(email);
+      setShowActivationModal(true);
+    }
+  }, []);
 
   if (!isLoaded) {
     return (
@@ -40,7 +53,12 @@ function PortalApp() {
 
   // If unauthenticated, show LoginScreen
   if (!currentUser) {
-    return <LoginScreen onLoginSuccess={() => setActiveTab('dashboard')} />;
+    return (
+      <LoginScreen
+        initialVerifiedEmail={verifiedEmailParam}
+        onLoginSuccess={() => setActiveTab('dashboard')}
+      />
+    );
   }
 
   // If authenticated but account is not yet activated, proceed to Activate Account page
@@ -49,6 +67,7 @@ function PortalApp() {
       <LoginScreen
         initialView="activate"
         initialUser={currentUser}
+        initialVerifiedEmail={verifiedEmailParam}
         onLoginSuccess={() => setActiveTab('dashboard')}
       />
     );
@@ -63,9 +82,10 @@ function PortalApp() {
         onOpenActivation={() => setShowActivationModal(true)}
       />
 
-      {/* Account Activation Modal callable from top bar */}
+      {/* Account Activation Modal callable from top bar or Gmail verification */}
       <AccountActivationModal
         isOpen={showActivationModal}
+        initialVerifiedEmail={verifiedEmailParam}
         onClose={() => setShowActivationModal(false)}
         onProceedToLogin={(u) => {
           setShowActivationModal(false);

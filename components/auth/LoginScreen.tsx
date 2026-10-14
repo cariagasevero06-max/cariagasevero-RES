@@ -1,35 +1,70 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { usePortal } from '@/lib/PortalContext';
 import { FirstTimePasswordResetModal } from './FirstTimePasswordResetModal';
-import { CheckCircle2, Copy, Check } from 'lucide-react';
+import {
+  CheckCircle2,
+  Copy,
+  Check,
+  ShieldCheck,
+  Mail,
+  ArrowRight,
+  RefreshCw,
+  ArrowLeft,
+  KeyRound,
+  AlertCircle,
+} from 'lucide-react';
 
 import { User } from '@/lib/types';
 
 interface Props {
   onLoginSuccess: () => void;
-  initialView?: 'login' | 'activate';
+  initialView?: 'login' | 'activate' | 'otp';
   initialUser?: User | null;
+  initialVerifiedEmail?: string;
 }
 
-export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, initialUser }) => {
-  const { login, activateAccount } = usePortal();
+export const LoginScreen: React.FC<Props> = ({
+  onLoginSuccess,
+  initialView,
+  initialUser,
+  initialVerifiedEmail,
+}) => {
+  const { login, requestActivationOtp, verifyActivationOtp } = usePortal();
 
-  // Mode: 'login' (Image 2) or 'activate' (Image 3)
-  const [view, setView] = useState<'login' | 'activate'>(initialView || 'login');
+  // Mode: 'login', 'activate', or 'otp'
+  const [view, setView] = useState<'login' | 'activate' | 'otp'>(
+    initialView || 'login'
+  );
 
   // Login form state
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [verifiedNotice, setVerifiedNotice] = useState('');
 
-  // Activate form state
-  const [employeeId, setEmployeeId] = useState(initialUser?.id || '');
-  const [companyEmail, setCompanyEmail] = useState(initialUser?.email || '');
+  // Activate form state (Employee ID & Personal Gmail)
+  const [employeeId, setEmployeeId] = useState(initialUser?.id || 'EMP-2024-006');
+  const [personalEmail, setPersonalEmail] = useState(
+    initialUser?.personalEmail || initialUser?.email || 'cariagasevero06@gmail.com'
+  );
+  const [activationNotice, setActivationNotice] = useState('');
   const [activationError, setActivationError] = useState('');
   const [isActivating, setIsActivating] = useState(false);
+
+  // OTP state
+  const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', '']);
+  const [activeOtpCode, setActiveOtpCode] = useState('');
+  const [otpError, setOtpError] = useState('');
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(60);
+  const [isResending, setIsResending] = useState(false);
+  const [brevoStatus, setBrevoStatus] = useState<{ sent: boolean; message: string } | null>(null);
+  const otpInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Success state
   const [activationSuccess, setActivationSuccess] = useState<{
     username: string;
     temporaryPassword: string;
@@ -40,6 +75,44 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
 
   // First-time reset modal
   const [showFirstTimeReset, setShowFirstTimeReset] = useState(false);
+
+  // Check for verified email query param or props from Gmail redirect
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const isVerified = params.get('verified') === 'true' || params.get('status') === 'verified';
+      const email = params.get('email') || initialVerifiedEmail || '';
+
+      if (isVerified || email) {
+        setVerifiedNotice(
+          email
+            ? `Personal email (${email}) confirmed via Brevo! Please log in to access your portal.`
+            : 'Your email has been successfully verified via Brevo SMTP! You can now log in.'
+        );
+        if (email) {
+          setUsername(email.split('@')[0]);
+        }
+      }
+    }
+  }, [initialVerifiedEmail]);
+
+  // Countdown timer for resending OTP
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (view === 'otp' && resendCountdown > 0) {
+      timer = setTimeout(() => setResendCountdown((prev) => prev - 1), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [view, resendCountdown]);
+
+  // Focus first OTP input when view switches to 'otp'
+  useEffect(() => {
+    if (view === 'otp') {
+      setTimeout(() => {
+        otpInputRefs.current[0]?.focus();
+      }, 150);
+    }
+  }, [view]);
 
   // Handle Login submission
   const handleLoginSubmit = (e: React.FormEvent) => {
@@ -55,14 +128,19 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
     setTimeout(() => {
       setIsLoading(false);
       const res = login(username, password);
+
       if (res.success && res.user) {
-        if (!res.user.isActivated) {
-          // Proceed to activate page!
+        // If account has not been activated, route directly to Activate Account & OTP
+        if (res.needsActivation || !res.user.isActivated) {
           setEmployeeId(res.user.id);
-          setCompanyEmail(res.user.email);
+          setPersonalEmail(res.user.personalEmail || res.user.email || 'cariagasevero06@gmail.com');
+          setActivationNotice(
+            `Welcome, ${res.user.fullName}! Your employee account requires personal email verification via Brevo OTP.`
+          );
           setView('activate');
           return;
         }
+
         if (res.user.firstTimeLogin) {
           setShowFirstTimeReset(true);
         } else {
@@ -74,8 +152,8 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
     }, 350);
   };
 
-  // Handle Account Activation submission
-  const handleActivateSubmit = (e: React.FormEvent) => {
+  // Handle Step 1: Request OTP for Account Activation to Personal Email
+  const handleRequestOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setActivationError('');
 
@@ -83,21 +161,123 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
       setActivationError('Please enter your Employee ID');
       return;
     }
-    if (!companyEmail.trim()) {
-      setActivationError('Please enter your Company Email');
+    if (!personalEmail.trim()) {
+      setActivationError('Please enter your Personal Email (Gmail)');
       return;
     }
 
     setIsActivating(true);
-    setTimeout(() => {
+    try {
+      const res = await requestActivationOtp(employeeId, personalEmail);
       setIsActivating(false);
-      const res = activateAccount(employeeId, companyEmail);
-      if (res.success && res.credentials) {
-        setActivationSuccess(res.credentials);
+
+      if (res.success) {
+        setActiveOtpCode(res.otp || '');
+        setBrevoStatus({
+          sent: Boolean(res.brevoSent),
+          message: res.brevoMessage || res.message,
+        });
+        setResendCountdown(60);
+        setOtpDigits(['', '', '', '', '', '']);
+        setOtpError('');
+        setView('otp');
       } else {
-        setActivationError(res.message || 'Verification failed. Please check your Employee ID and Email.');
+        setActivationError(res.message);
+      }
+    } catch {
+      setIsActivating(false);
+      setActivationError('Failed to dispatch OTP. Please check your network and try again.');
+    }
+  };
+
+  // Handle OTP digit changes
+  const handleOtpChange = (index: number, value: string) => {
+    const cleanVal = value.replace(/[^0-9]/g, '');
+
+    if (cleanVal.length > 1) {
+      const pasted = cleanVal.slice(0, 6).split('');
+      const newDigits = [...otpDigits];
+      pasted.forEach((char, i) => {
+        if (i < 6) newDigits[i] = char;
+      });
+      setOtpDigits(newDigits);
+      setOtpError('');
+      const nextIndex = Math.min(pasted.length, 5);
+      otpInputRefs.current[nextIndex]?.focus();
+      return;
+    }
+
+    const newDigits = [...otpDigits];
+    newDigits[index] = cleanVal;
+    setOtpDigits(newDigits);
+    setOtpError('');
+
+    if (cleanVal && index < 5) {
+      otpInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  // Handle backspace navigation in OTP inputs
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otpDigits[index] && index > 0) {
+      otpInputRefs.current[index - 1]?.focus();
+    }
+  };
+
+  // Handle Step 2: Verify OTP
+  const handleVerifyOtpSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setOtpError('');
+
+    const enteredOtp = otpDigits.join('');
+    if (enteredOtp.length < 6) {
+      setOtpError('Please enter all 6 digits of your OTP code.');
+      return;
+    }
+
+    setIsVerifyingOtp(true);
+    setTimeout(() => {
+      setIsVerifyingOtp(false);
+      const res = verifyActivationOtp(employeeId, enteredOtp);
+
+      if (res.success && res.user) {
+        setActivationSuccess({
+          username: res.user.username,
+          temporaryPassword: res.user.temporaryPassword || 'TempAaron2024!',
+          employeeName: res.user.fullName,
+          email: personalEmail,
+        });
+      } else {
+        setOtpError(res.message);
       }
     }, 450);
+  };
+
+  // Resend OTP code to personal email
+  const handleResendOtp = async () => {
+    if (resendCountdown > 0 || isResending) return;
+    setIsResending(true);
+    setOtpError('');
+
+    const res = await requestActivationOtp(employeeId, personalEmail);
+    setIsResending(false);
+    if (res.success) {
+      setActiveOtpCode(res.otp || '');
+      setBrevoStatus({
+        sent: Boolean(res.brevoSent),
+        message: res.brevoMessage || res.message,
+      });
+      setResendCountdown(60);
+    } else {
+      setOtpError(res.message);
+    }
+  };
+
+  // Quick helper to fill demo OTP
+  const handleAutoFillDemoOtp = () => {
+    const code = activeOtpCode || '123456';
+    setOtpDigits(code.split('').slice(0, 6));
+    setOtpError('');
   };
 
   const copyCredentials = () => {
@@ -120,9 +300,9 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
         }}
       />
 
-      {/* LEFT COLUMN: Card Container (Image 2 & Image 3) */}
+      {/* LEFT COLUMN: Card Container */}
       <div className="w-full lg:w-1/2 flex items-center justify-center p-6 sm:p-10 lg:p-14">
-        <div className="w-full max-w-[430px] bg-[#A4A895] rounded-[34px] sm:rounded-[38px] p-7 sm:p-10 shadow-xl transition-all duration-300">
+        <div className="w-full max-w-[440px] bg-[#A4A895] rounded-[34px] sm:rounded-[38px] p-7 sm:p-10 shadow-xl transition-all duration-300">
           {/* Brand Header */}
           <div className="text-center">
             <span className="font-bold text-base sm:text-lg tracking-wider text-[#141412] underline underline-offset-4 decoration-2">
@@ -130,7 +310,7 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
             </span>
           </div>
 
-          {/* VIEW 1: LOGIN (Image 2) */}
+          {/* VIEW 1: LOGIN */}
           {view === 'login' && (
             <div className="animate-in fade-in duration-200">
               <div className="mt-8 mb-6">
@@ -141,6 +321,13 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
                   ISTOREYA a store with many stories
                 </p>
               </div>
+
+              {verifiedNotice && (
+                <div className="mb-4 bg-emerald-50 border border-emerald-300 text-emerald-900 p-3 rounded-2xl text-xs flex items-start gap-2 shadow-xs">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <span className="font-medium">{verifiedNotice}</span>
+                </div>
+              )}
 
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
@@ -190,6 +377,7 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
                   </button>
                 </div>
 
+                {/* Only Employee Activation Option */}
                 <div className="mt-8 text-center text-xs text-[#141412]">
                   <span>Newly hired? click here </span>
                   <button
@@ -199,6 +387,7 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
                       setErrorMessage('');
                       setActivationSuccess(null);
                       setActivationError('');
+                      setActivationNotice('');
                     }}
                     className="font-bold underline decoration-1 text-[#141412] hover:opacity-80 cursor-pointer"
                   >
@@ -209,115 +398,307 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
             </div>
           )}
 
-          {/* VIEW 2: ACTIVATE ACCOUNT (Image 3) */}
+          {/* VIEW 2: ACTIVATE ACCOUNT (Verify with Personal Email / Gmail) */}
           {view === 'activate' && (
             <div className="animate-in fade-in duration-200">
-              <div className="mt-8 mb-6 text-center">
+              <div className="mt-8 mb-5 text-center">
                 <h2 className="text-3xl font-normal text-[#141412] tracking-tight">
                   Welcome!
                 </h2>
                 <p className="text-xs text-[#2A2926] mt-1 font-normal max-w-xs mx-auto">
-                  Use your employee Id and Company Email to activate your acount
+                  Use your Employee ID and Personal Gmail to verify and activate your account
                 </p>
               </div>
 
-              {!activationSuccess ? (
-                <form onSubmit={handleActivateSubmit} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-[#141412] mb-1.5 ml-1">
-                      Enter Employee Id:
-                    </label>
-                    <input
-                      type="text"
-                      value={employeeId}
-                      onChange={(e) => {
-                        setEmployeeId(e.target.value);
-                        setActivationError('');
-                      }}
-                      placeholder="e.g., EMP-2024-003"
-                      className="w-full px-5 py-3 rounded-full bg-white text-sm text-[#141412] placeholder-[#8C877D] outline-none shadow-xs transition"
-                    />
-                  </div>
+              {activationNotice && (
+                <div className="mb-4 bg-[#F2EDE0] border border-[#DDD3C2] p-2.5 rounded-2xl text-[11px] text-[#2C2523] leading-relaxed text-center font-medium">
+                  {activationNotice}
+                </div>
+              )}
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#141412] mb-1.5 ml-1">
-                      Enter Company Email
-                    </label>
-                    <input
-                      type="email"
-                      value={companyEmail}
-                      onChange={(e) => {
-                        setCompanyEmail(e.target.value);
-                        setActivationError('');
-                      }}
-                      placeholder="e.g., chloe.rivera@istoreya.com"
-                      className="w-full px-5 py-3 rounded-full bg-white text-sm text-[#141412] placeholder-[#8C877D] outline-none shadow-xs transition"
-                    />
-                  </div>
+              <form onSubmit={handleRequestOtpSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#141412] mb-1.5 ml-1">
+                    Enter Employee Id:
+                  </label>
+                  <input
+                    type="text"
+                    value={employeeId}
+                    onChange={(e) => {
+                      setEmployeeId(e.target.value);
+                      setActivationError('');
+                    }}
+                    placeholder="e.g., EMP-2024-006"
+                    className="w-full px-5 py-3 rounded-full bg-white text-sm text-[#141412] placeholder-[#8C877D] outline-none shadow-xs transition"
+                  />
+                </div>
 
-                  {activationError && (
-                    <p className="text-xs font-bold text-red-600 underline decoration-red-600 mt-2 text-center">
-                      {activationError}
-                    </p>
-                  )}
+                <div>
+                  <label className="block text-xs font-semibold text-[#141412] mb-1.5 ml-1">
+                    Enter Personal Email (Gmail) to Verify:
+                  </label>
+                  <input
+                    type="email"
+                    value={personalEmail}
+                    onChange={(e) => {
+                      setPersonalEmail(e.target.value);
+                      setActivationError('');
+                    }}
+                    placeholder="e.g., cariagasevero06@gmail.com"
+                    className="w-full px-5 py-3 rounded-full bg-white text-sm text-[#141412] placeholder-[#8C877D] outline-none shadow-xs transition"
+                  />
+                  <span className="text-[10px] text-[#2C2523]/80 ml-2 mt-1 block">
+                    We will send your 6-digit OTP code to this personal email.
+                  </span>
+                </div>
 
-                  <div className="pt-2 text-center">
-                    <button
-                      type="submit"
-                      disabled={isActivating}
-                      className="w-52 py-2.5 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] active:scale-[0.98] text-[#141412] font-semibold text-sm transition shadow-xs mx-auto block cursor-pointer disabled:opacity-60"
-                    >
-                      {isActivating ? 'Verifying...' : 'Activate Account'}
-                    </button>
-                  </div>
-
-                  <p className="mt-8 text-xs font-bold text-[#141412] text-center">
-                    We’ll send a message on your email after clicking activate
-                  </p>
-
-                  <div className="mt-4 text-center text-xs text-[#141412]">
-                    <span>Already activated? click here </span>
+                {/* Quick Pre-fill Employee Accounts */}
+                <div className="pt-0.5 space-y-1.5">
+                  <span className="text-[10px] text-[#2C2523] block mb-1 font-medium">
+                    Quick test employee accounts:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
                     <button
                       type="button"
                       onClick={() => {
-                        setView('login');
+                        setEmployeeId('EMP-2024-006');
+                        setPersonalEmail('cariagasevero06@gmail.com');
                         setActivationError('');
                       }}
-                      className="font-bold underline decoration-1 text-[#141412] hover:opacity-80 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#2C2523] hover:bg-black text-[11px] font-semibold text-white transition shadow-2xs cursor-pointer"
                     >
-                      Log in
+                      <span>✨ Aaron Tumaliuan (EMP-2024-006 • cariagasevero06@gmail.com)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmployeeId('EMP-2024-003');
+                        setPersonalEmail('chloe.rivera@istoreya.com');
+                        setActivationError('');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] text-[11px] font-semibold text-[#141412] transition shadow-2xs cursor-pointer"
+                    >
+                      <span>Chloe Rivera (EMP-2024-003)</span>
                     </button>
                   </div>
-                </form>
+                </div>
+
+                {activationError && (
+                  <p className="text-xs font-bold text-red-600 underline decoration-red-600 mt-2 text-center">
+                    {activationError}
+                  </p>
+                )}
+
+                <div className="pt-2 text-center">
+                  <button
+                    type="submit"
+                    disabled={isActivating}
+                    className="w-56 py-2.5 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] active:scale-[0.98] text-[#141412] font-semibold text-sm transition shadow-xs mx-auto block cursor-pointer disabled:opacity-60"
+                  >
+                    {isActivating ? 'Verifying & Sending OTP...' : 'Send Verification OTP'}
+                  </button>
+                </div>
+
+                <p className="mt-4 text-[11px] font-semibold text-[#2C2523] text-center">
+                  Verification OTP is routed to your Gmail via Brevo SMTP (Port 587)
+                </p>
+
+                <div className="mt-3 text-center text-xs text-[#141412]">
+                  <span>Already activated? click here </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setView('login');
+                      setActivationError('');
+                      setActivationNotice('');
+                    }}
+                    className="font-bold underline decoration-1 text-[#141412] hover:opacity-80 cursor-pointer"
+                  >
+                    Log in
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* VIEW 3: OTP AUTHENTICATION & VERIFICATION */}
+          {view === 'otp' && (
+            <div className="animate-in fade-in duration-200">
+              {!activationSuccess ? (
+                <div>
+                  <div className="mt-6 mb-4 text-center">
+                    <div className="w-11 h-11 rounded-2xl bg-[#EDE8CF] text-[#141412] flex items-center justify-center mx-auto mb-2 shadow-xs">
+                      <ShieldCheck className="w-6 h-6 text-[#2C2523]" />
+                    </div>
+                    <h2 className="text-2xl font-serif font-bold text-[#141412] tracking-tight">
+                      Verify Your Personal Email
+                    </h2>
+                    <p className="text-xs text-[#2A2926] mt-1 max-w-xs mx-auto leading-relaxed">
+                      Enter the 6-digit authentication OTP code sent to your personal Gmail{' '}
+                      <span className="font-semibold underline decoration-1 text-[#141412]">
+                        {personalEmail}
+                      </span>{' '}
+                      via Brevo SMTP.
+                    </p>
+                  </div>
+
+                  {/* Brevo SMTP Live Dispatch Indicator */}
+                  {brevoStatus && (
+                    <div
+                      className={`mb-3 p-3 rounded-2xl text-xs flex items-start gap-2 shadow-2xs ${
+                        brevoStatus.sent
+                          ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                          : 'bg-amber-50 border border-amber-300 text-amber-900'
+                      }`}
+                    >
+                      {brevoStatus.sent ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        {brevoStatus.sent ? (
+                          <span>
+                            <strong>Brevo Dispatched:</strong> Code successfully delivered to{' '}
+                            <strong>{personalEmail}</strong>! Please check your Gmail inbox (and Spam folder).
+                          </span>
+                        ) : (
+                          <span>
+                            <strong>Brevo Notice:</strong>{' '}
+                            {brevoStatus.message || (
+                              <>
+                                To receive real emails in Gmail, enter your Brevo SMTP User &amp; Key in{' '}
+                                <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-[10px]">.env.local</code>.
+                              </>
+                            )}
+                            <span className="block mt-1 text-[#6E5A47]">Your testing OTP is ready below.</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Dev / Test Code Helper Badge */}
+                  {activeOtpCode && (
+                    <div className="mb-3 bg-white/80 border border-white/60 p-2.5 rounded-2xl flex items-center justify-between text-xs shadow-2xs">
+                      <div className="flex items-center gap-1.5 text-[#2C2523]">
+                        <KeyRound className="w-3.5 h-3.5 text-[#B85032]" />
+                        <span>Generated OTP:</span>
+                        <strong className="font-mono text-sm tracking-widest text-[#B85032]">
+                          {activeOtpCode}
+                        </strong>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleAutoFillDemoOtp}
+                        className="text-[10px] font-bold text-[#141412] bg-[#EDE8CF] hover:bg-[#E2DDC2] px-2 py-0.5 rounded-full transition cursor-pointer"
+                      >
+                        Auto-fill
+                      </button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleVerifyOtpSubmit} className="space-y-4">
+                    {/* 6 Digit Input Boxes */}
+                    <div className="flex items-center justify-between gap-1.5 sm:gap-2 my-2">
+                      {otpDigits.map((digit, idx) => (
+                        <input
+                          key={idx}
+                          ref={(el) => {
+                            otpInputRefs.current[idx] = el;
+                          }}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={1}
+                          value={digit}
+                          onChange={(e) => handleOtpChange(idx, e.target.value)}
+                          onKeyDown={(e) => handleOtpKeyDown(idx, e)}
+                          className="w-11 h-13 sm:w-12 sm:h-14 text-center text-xl font-bold font-mono rounded-xl sm:rounded-2xl bg-white text-[#141412] shadow-xs outline-none focus:ring-2 focus:ring-[#2C2523] border border-white/80 transition"
+                        />
+                      ))}
+                    </div>
+
+                    {otpError && (
+                      <p className="text-xs font-bold text-red-600 underline decoration-red-600 text-center">
+                        {otpError}
+                      </p>
+                    )}
+
+                    <div className="pt-2 text-center">
+                      <button
+                        type="submit"
+                        disabled={isVerifyingOtp}
+                        className="w-60 py-2.5 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] active:scale-[0.98] text-[#141412] font-semibold text-sm transition shadow-xs mx-auto block cursor-pointer disabled:opacity-60"
+                      >
+                        {isVerifyingOtp ? 'Verifying OTP...' : 'Verify & Complete Activation'}
+                      </button>
+                    </div>
+
+                    {/* Resend & Back controls */}
+                    <div className="pt-2 flex flex-col items-center gap-2 text-xs text-[#141412]">
+                      <div className="flex items-center gap-1.5">
+                        <span>Didn&apos;t receive the code?</span>
+                        {resendCountdown > 0 ? (
+                          <span className="font-semibold text-[#3C3632]">
+                            Resend in {resendCountdown}s
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleResendOtp}
+                            disabled={isResending}
+                            className="font-bold underline decoration-1 text-[#141412] hover:opacity-80 flex items-center gap-1 cursor-pointer"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${isResending ? 'animate-spin' : ''}`} />
+                            <span>Resend Code</span>
+                          </button>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setView('activate');
+                          setOtpError('');
+                        }}
+                        className="text-[11px] text-[#2C2523] hover:underline flex items-center gap-1 mt-1 cursor-pointer"
+                      >
+                        <ArrowLeft className="w-3 h-3" />
+                        <span>Change Email or ID</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
               ) : (
-                /* Activation Success Card */
+                /* Success Confirmation Card */
                 <div className="space-y-4 py-2 animate-in fade-in duration-200">
                   <div className="bg-white/95 p-5 rounded-2xl border border-white text-xs space-y-3 shadow-xs">
                     <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm">
                       <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                      <span>Account Verified & Activated!</span>
+                      <span>Employee Verified & Activated!</span>
                     </div>
                     <p className="text-[#3C3632]">
-                      Welcome to the team, <strong>{activationSuccess.employeeName}</strong>! Your account has been verified and temporary credentials are ready:
+                      Welcome to ISTOREYA, <strong>{activationSuccess.employeeName}</strong>! Your personal email has been authenticated via Brevo OTP:
                     </p>
                     <div className="bg-[#FAF7F2] p-3 rounded-xl border border-[#D8CEBE] font-mono text-xs space-y-1 relative">
                       <div>
                         Username: <strong className="text-[#141412]">{activationSuccess.username}</strong>
                       </div>
                       <div>
-                        Temporary Password: <strong className="text-[#B85032]">{activationSuccess.temporaryPassword}</strong>
+                        Temporary Password:{' '}
+                        <strong className="text-[#B85032]">{activationSuccess.temporaryPassword}</strong>
                       </div>
                       <button
                         type="button"
                         onClick={copyCredentials}
-                        className="absolute top-2.5 right-2.5 px-2 py-1 rounded bg-white hover:bg-[#F0EAE1] text-[10px] font-sans font-semibold border border-[#D8CEBE] flex items-center gap-1 transition"
+                        className="absolute top-2.5 right-2.5 px-2 py-1 rounded bg-white hover:bg-[#F0EAE1] text-[10px] font-sans font-semibold border border-[#D8CEBE] flex items-center gap-1 transition cursor-pointer"
                       >
                         {copiedCreds ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
                         <span>{copiedCreds ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
                     <p className="text-[11px] text-[#6B5E57] italic">
-                      You will be asked to set your permanent password upon logging in.
+                      You will be asked to set your permanent credentials on first sign in.
                     </p>
                   </div>
 
@@ -326,7 +707,7 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
                     onClick={() => {
                       onLoginSuccess();
                     }}
-                    className="w-52 py-2.5 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] active:scale-[0.98] text-[#141412] font-semibold text-sm transition shadow-xs mx-auto block cursor-pointer"
+                    className="w-56 py-2.5 rounded-full bg-[#EDE8CF] hover:bg-[#E2DDC2] active:scale-[0.98] text-[#141412] font-semibold text-sm transition shadow-xs mx-auto block cursor-pointer"
                   >
                     Proceed to Dashboard
                   </button>
@@ -337,9 +718,8 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
         </div>
       </div>
 
-      {/* RIGHT COLUMN: Architectural Storefront (Image 2 & Image 3) */}
+      {/* RIGHT COLUMN: Architectural Storefront */}
       <div className="w-full lg:w-1/2 relative min-h-[440px] lg:min-h-screen bg-[#F0ECE1] overflow-hidden flex items-center justify-center select-none">
-        {/* Architectural Facade Vector & Shading */}
         <div className="absolute inset-0 bg-gradient-to-b from-[#ECE5D8] via-[#F4EFE6] to-[#E5DECD] opacity-90" />
 
         <svg
@@ -358,158 +738,113 @@ export const LoginScreen: React.FC<Props> = ({ onLoginSuccess, initialView, init
               <stop offset="55%" stopColor="#F9E2C2" />
               <stop offset="100%" stopColor="#ECD0AB" />
             </linearGradient>
-            <linearGradient id="goldBrass" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#C8A565" />
-              <stop offset="50%" stopColor="#E5C78A" />
-              <stop offset="100%" stopColor="#B8934E" />
+            <linearGradient id="roofShadow" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="#5A524C" />
+              <stop offset="100%" stopColor="#2C2523" />
             </linearGradient>
-            <linearGradient id="glassReflection" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="rgba(255,255,255,0.32)" />
-              <stop offset="40%" stopColor="rgba(255,255,255,0.06)" />
-              <stop offset="60%" stopColor="rgba(255,255,255,0.20)" />
-              <stop offset="100%" stopColor="rgba(255,255,255,0.04)" />
-            </linearGradient>
-            <linearGradient id="pedestal" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#F5EFE6" />
-              <stop offset="100%" stopColor="#E2D8C7" />
-            </linearGradient>
-            <linearGradient id="pedestalSide" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#D8CDBC" />
-              <stop offset="100%" stopColor="#C4B8A5" />
-            </linearGradient>
-            <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="8" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            <filter id="softShadow" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="6" stdDeviation="8" floodColor="#2C2523" floodOpacity="0.15" />
             </filter>
           </defs>
 
-          {/* Exterior Stone Facade */}
-          <rect x="0" y="0" width="800" height="1000" fill="url(#wallGrad)" />
+          {/* Sky background / atmosphere */}
+          <rect width="800" height="1000" fill="#E8E2D2" />
+          <circle cx="680" cy="180" r="160" fill="#FDFBF7" opacity="0.6" />
 
-          {/* Grand Arch Molding Shadow */}
-          <path
-            d="M 120 900 L 120 300 C 120 120, 680 120, 680 300 L 680 900 Z"
-            fill="#000000"
-            opacity="0.10"
-            transform="translate(0, 8)"
-          />
+          {/* Roof overhang & Parapet */}
+          <polygon points="120,240 680,240 650,265 150,265" fill="#3D3531" />
+          <rect x="140" y="265" width="520" height="18" fill="#4B413C" />
 
-          {/* Arch Opening (Travertine Recess) */}
-          <path
-            d="M 120 900 L 120 280 C 120 110, 680 110, 680 280 L 680 900 Z"
-            fill="#D8CEBD"
-          />
+          {/* Main Facade Building Block */}
+          <rect x="150" y="283" width="500" height="580" fill="url(#wallGrad)" rx="4" />
 
-          {/* Inner Step Molding */}
-          <path
-            d="M 135 900 L 135 290 C 135 130, 665 130, 665 290 L 665 900 Z"
-            fill="#E8DFD0"
-          />
+          {/* Modernist Signboard */}
+          <rect x="250" y="315" width="300" height="48" rx="8" fill="#FFFFFF" filter="url(#softShadow)" />
+          <text
+            x="400"
+            y="346"
+            textAnchor="middle"
+            fontFamily="serif"
+            fontSize="18"
+            fontWeight="bold"
+            letterSpacing="5"
+            fill="#2C2523"
+          >
+            ISTOREYA
+          </text>
+          <text
+            x="400"
+            y="358"
+            textAnchor="middle"
+            fontFamily="sans-serif"
+            fontSize="7"
+            letterSpacing="2"
+            fill="#8C7E77"
+          >
+            EST. 2024 • MANILA
+          </text>
 
-          {/* Interior Warm Ambient Glow */}
-          <path
-            d="M 150 900 L 150 300 C 150 150, 650 150, 650 300 L 650 900 Z"
-            fill="url(#interiorGlow)"
-          />
+          {/* Main Glass Storefront Framing */}
+          <rect x="180" y="390" width="440" height="420" rx="6" fill="#1C1816" filter="url(#softShadow)" />
+          <rect x="188" y="398" width="424" height="404" rx="4" fill="url(#interiorGlow)" />
 
-          {/* Spotlights */}
-          <circle cx="280" cy="260" r="14" fill="#FFF9ED" opacity="0.8" filter="url(#softGlow)" />
-          <circle cx="400" cy="235" r="16" fill="#FFF9ED" opacity="0.9" filter="url(#softGlow)" />
-          <circle cx="520" cy="260" r="14" fill="#FFF9ED" opacity="0.8" filter="url(#softGlow)" />
+          {/* Glass Mullions */}
+          <line x1="188" y1="530" x2="612" y2="530" stroke="#1C1816" strokeWidth="6" />
+          <line x1="330" y1="398" x2="330" y2="802" stroke="#1C1816" strokeWidth="6" />
+          <line x1="470" y1="398" x2="470" y2="802" stroke="#1C1816" strokeWidth="6" />
 
-          {/* Display Pedestals (Left) */}
-          <g opacity="0.95">
-            <rect x="180" y="700" width="100" height="200" fill="url(#pedestal)" />
-            <polygon points="180,700 210,675 310,675 280,700" fill="#FFFBF5" />
-            <polygon points="280,700 310,675 310,875 280,900" fill="url(#pedestalSide)" />
+          {/* Central Entrance Double Door */}
+          <rect x="333" y="533" width="134" height="266" fill="#F4EFE6" opacity="0.2" />
+          <line x1="400" y1="533" x2="400" y2="802" stroke="#1C1816" strokeWidth="4" />
+          <rect x="385" y="650" width="4" height="36" rx="2" fill="#2C2523" />
+          <rect x="411" y="650" width="4" height="36" rx="2" fill="#2C2523" />
 
-            <rect x="220" y="750" width="90" height="150" fill="url(#pedestal)" />
-            <polygon points="220,750 245,730 335,730 310,750" fill="#FFFBF5" />
-            <polygon points="310,750 335,730 335,880 310,900" fill="url(#pedestalSide)" />
+          {/* Interior Curated Displays */}
+          <rect x="206" y="560" width="105" height="12" fill="#2C2523" rx="2" />
+          <rect x="212" y="535" width="18" height="25" fill="#B85032" rx="1" />
+          <rect x="234" y="528" width="14" height="32" fill="#4B413C" rx="1" />
+          <rect x="252" y="540" width="20" height="20" fill="#D8CEBE" rx="1" />
+          <rect x="276" y="532" width="22" height="28" fill="#6B5E57" rx="1" />
 
-            <ellipse cx="250" cy="670" rx="14" ry="5" fill="#E8DDD0" />
-            <path d="M 238 670 C 235 645, 230 630, 240 610 C 245 600, 255 600, 260 610 C 270 630, 265 645, 262 670 Z" fill="#FAF6EE" />
-          </g>
+          <rect x="488" y="560" width="105" height="12" fill="#2C2523" rx="2" />
+          <circle cx="515" cy="542" r="14" fill="#C26A4A" />
+          <rect x="540" y="530" width="16" height="30" fill="#2C2523" rx="1" />
+          <polygon points="575,532 590,560 560,560" fill="#8C7E77" />
 
-          {/* Display Pedestals & Garments (Right) */}
-          <g opacity="0.95">
-            <line x1="510" y1="620" x2="620" y2="620" stroke="#3A332F" strokeWidth="4" />
-            <line x1="520" y1="620" x2="520" y2="860" stroke="#3A332F" strokeWidth="4" />
-            <line x1="610" y1="620" x2="610" y2="860" stroke="#3A332F" strokeWidth="4" />
+          {/* Designer Pendant Lamps */}
+          <line x1="260" y1="398" x2="260" y2="445" stroke="#1C1816" strokeWidth="2" />
+          <ellipse cx="260" cy="450" rx="22" ry="10" fill="#2C2523" />
+          <circle cx="260" cy="454" r="5" fill="#FFE2A3" />
 
-            <rect x="530" y="635" width="16" height="150" rx="3" fill="#FAF8F3" opacity="0.9" />
-            <rect x="555" y="635" width="16" height="140" rx="3" fill="#D4B69B" opacity="0.9" />
-            <rect x="580" y="635" width="16" height="160" rx="3" fill="#3D3531" opacity="0.85" />
+          <line x1="400" y1="398" x2="400" y2="440" stroke="#1C1816" strokeWidth="2" />
+          <ellipse cx="400" cy="445" rx="26" ry="12" fill="#2C2523" />
+          <circle cx="400" cy="450" r="6" fill="#FFE2A3" />
 
-            <rect x="490" y="780" width="80" height="120" fill="url(#pedestal)" />
-            <polygon points="490,780 515,760 595,760 570,780" fill="#FFFBF5" />
-            <polygon points="570,780 595,760 595,880 570,900" fill="url(#pedestalSide)" />
-          </g>
+          <line x1="540" y1="398" x2="540" y2="445" stroke="#1C1816" strokeWidth="2" />
+          <ellipse cx="540" cy="450" rx="22" ry="10" fill="#2C2523" />
+          <circle cx="540" cy="454" r="5" fill="#FFE2A3" />
 
-          {/* Outer Frame (Bronze Arch with Gold Trim) */}
-          <path
-            d="M 150 900 L 150 300 C 150 150, 650 150, 650 300 L 650 900"
-            fill="none"
-            stroke="#262321"
-            strokeWidth="14"
-          />
-          <path
-            d="M 157 900 L 157 300 C 157 157, 643 157, 643 300 L 643 900"
-            fill="none"
-            stroke="url(#goldBrass)"
-            strokeWidth="6"
-          />
+          {/* Exterior Pavement & Terrace Steps */}
+          <rect x="80" y="860" width="640" height="20" fill="#C7BEB0" rx="2" />
+          <rect x="50" y="880" width="700" height="30" fill="#B0A696" rx="2" />
+          <rect x="20" y="910" width="760" height="90" fill="#9C9282" />
 
-          {/* Transom Divider */}
-          <rect x="150" y="475" width="500" height="10" fill="#262321" />
-          <rect x="150" y="477" width="500" height="4" fill="url(#goldBrass)" />
+          {/* Planter Boxes & Architectural Greenery */}
+          <rect x="110" y="810" width="55" height="52" rx="4" fill="#2C2523" />
+          <circle cx="137" cy="790" r="28" fill="#4F5D44" />
+          <circle cx="125" cy="780" r="18" fill="#6A7B5E" />
+          <circle cx="150" cy="782" r="20" fill="#3D4934" />
 
-          {/* Upper Window Mullions */}
-          <line x1="250" y1="210" x2="250" y2="475" stroke="#262321" strokeWidth="6" />
-          <line x1="250" y1="210" x2="250" y2="475" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          <line x1="350" y1="165" x2="350" y2="475" stroke="#262321" strokeWidth="6" />
-          <line x1="350" y1="165" x2="350" y2="475" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          <line x1="450" y1="165" x2="450" y2="475" stroke="#262321" strokeWidth="6" />
-          <line x1="450" y1="165" x2="450" y2="475" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          <line x1="550" y1="210" x2="550" y2="475" stroke="#262321" strokeWidth="6" />
-          <line x1="550" y1="210" x2="550" y2="475" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          {/* Double Glass Doors */}
-          <rect x="394" y="485" width="12" height="415" fill="#262321" />
-          <rect x="398" y="485" width="4" height="415" fill="url(#goldBrass)" />
-
-          <rect x="150" y="485" width="244" height="415" fill="none" stroke="#262321" strokeWidth="8" />
-          <rect x="154" y="489" width="236" height="407" fill="none" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          <rect x="406" y="485" width="244" height="415" fill="none" stroke="#262321" strokeWidth="8" />
-          <rect x="410" y="489" width="236" height="407" fill="none" stroke="url(#goldBrass)" strokeWidth="2.5" />
-
-          {/* Door Handles */}
-          <rect x="382" y="620" width="6" height="85" rx="3" fill="#1A1816" />
-          <rect x="412" y="620" width="6" height="85" rx="3" fill="#1A1816" />
-
-          {/* Glass Reflections */}
-          <polygon points="155,485 280,485 155,750" fill="url(#glassReflection)" />
-          <polygon points="450,485 645,485 645,700 450,900" fill="url(#glassReflection)" />
-
-          {/* Threshold Steps */}
-          <rect x="100" y="900" width="600" height="24" fill="#DFD8C9" />
-          <rect x="100" y="900" width="600" height="4" fill="#F4EFE6" />
-          <rect x="60" y="924" width="680" height="30" fill="#CEC5B3" />
-          <rect x="60" y="924" width="680" height="4" fill="#E8E2D2" />
-          <rect x="0" y="954" width="800" height="46" fill="#BCB29E" />
+          <rect x="635" y="810" width="55" height="52" rx="4" fill="#2C2523" />
+          <circle cx="662" cy="790" r="28" fill="#4F5D44" />
+          <circle cx="650" cy="780" r="18" fill="#6A7B5E" />
+          <circle cx="675" cy="782" r="20" fill="#3D4934" />
         </svg>
 
-        {/* Centered Typography: ISTOREYA / A STORE WITH MANY STORIES */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center select-none pointer-events-none">
-          <h2 className="text-3xl sm:text-4xl md:text-5xl font-serif tracking-[0.22em] text-white font-light drop-shadow-[0_2px_12px_rgba(0,0,0,0.65)]">
-            ISTOREYA
-          </h2>
-          <p className="text-[11px] sm:text-xs md:text-sm tracking-[0.28em] font-sans font-light mt-2.5 uppercase text-white/95 drop-shadow-[0_1px_6px_rgba(0,0,0,0.65)]">
-            A STORE WITH MANY STORIES
+        {/* Ambient Overlay Quote */}
+        <div className="absolute bottom-6 left-8 right-8 text-center text-[#4B413C]/80 pointer-events-none">
+          <p className="font-serif italic text-xs tracking-wider">
+            &ldquo;A store with many stories — where every encounter has a narrative.&rdquo;
           </p>
         </div>
       </div>

@@ -17,6 +17,7 @@ import {
   INITIAL_LEAVES,
   INITIAL_ANNOUNCEMENTS,
 } from './mockData';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 
 interface ActivationResult {
   success: boolean;
@@ -39,8 +40,32 @@ interface PortalContextType {
   isLoaded: boolean;
   
   // Auth & Activation
-  login: (username: string, password: string) => { success: boolean; message: string; user?: User };
+  login: (username: string, password: string) => { success: boolean; message: string; user?: User; needsActivation?: boolean };
   logout: () => void;
+  signUpUser: (params: {
+    email: string;
+    password: string;
+    fullName?: string;
+    employeeId?: string;
+  }) => Promise<{
+    success: boolean;
+    message: string;
+    requiresEmailVerification?: boolean;
+    user?: any;
+  }>;
+  requestActivationOtp: (
+    employeeId: string,
+    email: string
+  ) => Promise<{
+    success: boolean;
+    message: string;
+    otp?: string;
+    employeeName?: string;
+    email?: string;
+    brevoSent?: boolean;
+    brevoMessage?: string;
+  }>;
+  verifyActivationOtp: (employeeId: string, otp: string) => { success: boolean; message: string; user?: User };
   activateAccount: (employeeId: string, email: string) => ActivationResult;
   resetFirstTimeCredentials: (newUsername: string, newPassword: string) => { success: boolean; message: string };
   switchUser: (userId: string) => void;
@@ -90,7 +115,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   useEffect(() => {
     try {
       const SCHEMA_VERSION_KEY = 'istoreya_schema_v';
-      const CURRENT_VERSION = '2026_v4';
+      const CURRENT_VERSION = '2026_v5';
       const storedVersion = localStorage.getItem(SCHEMA_VERSION_KEY);
 
       if (storedVersion !== CURRENT_VERSION) {
@@ -127,6 +152,76 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, []);
 
+  // Listen for Supabase auth state changes (e.g. email verified from Gmail activation link)
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+
+    // Check existing Supabase session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        syncSupabaseUser(session.user);
+      }
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if ((event === 'SIGNED_IN' || event === 'USER_UPDATED') && session?.user) {
+        syncSupabaseUser(session.user);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  const syncSupabaseUser = (user: any) => {
+    const email = user.email?.toLowerCase();
+    if (!email) return;
+
+    setUsers((prev) => {
+      const idx = prev.findIndex((u) => u.email.toLowerCase() === email);
+      if (idx !== -1) {
+        const updated: User = {
+          ...prev[idx],
+          isActivated: true,
+        };
+        const nextList = [...prev];
+        nextList[idx] = updated;
+        setCurrentUser(updated);
+        return nextList;
+      } else {
+        const newUser: User = {
+          id: user.user_metadata?.employee_id || `EMP-${Date.now().toString().slice(-4)}`,
+          username: email.split('@')[0],
+          fullName: user.user_metadata?.full_name || email.split('@')[0],
+          email,
+          role: 'employee',
+          position: 'Associate',
+          department: 'Store Operations',
+          dateHired: new Date().toISOString().split('T')[0],
+          status: 'Active',
+          dateOfBirth: '2001-01-01',
+          gender: 'Not specified',
+          phoneNumber: '+63 900 000 0000',
+          address: 'Metro Manila, Philippines',
+          avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&q=80',
+          emergencyContact: {
+            name: 'Primary Contact',
+            relationship: 'Family',
+            phoneNumber: '+63 900 000 0000',
+            address: 'Metro Manila',
+          },
+          isActivated: true,
+          firstTimeLogin: false,
+          vacationLeaveBalance: 15,
+          sickLeaveBalance: 10,
+        };
+        setCurrentUser(newUser);
+        return [...prev, newUser];
+      }
+    });
+  };
+
   // Sync to LocalStorage on changes
   useEffect(() => {
     if (!isLoaded) return;
@@ -159,15 +254,18 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return { success: false, message: 'Invalid Username' };
     }
 
-    if (!foundUser.isActivated) {
-      return {
-        success: false,
-        message: 'Account not activated yet. Newly hired employees must activate their account first.',
-      };
-    }
-
     if (foundUser.password !== cleanPass) {
       return { success: false, message: 'Incorrect Password' };
+    }
+
+    // If account has not been activated yet, route to Activate Account with OTP verification
+    if (!foundUser.isActivated) {
+      return {
+        success: true,
+        needsActivation: true,
+        message: 'Account not activated yet. Redirecting to employee activation and OTP verification...',
+        user: foundUser,
+      };
     }
 
     setCurrentUser(foundUser);
@@ -176,6 +274,219 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const logout = () => {
     setCurrentUser(null);
+    if (isSupabaseConfigured()) {
+      supabase.auth.signOut().catch(() => {});
+    }
+  };
+
+  // Supabase Auth Sign Up with Brevo SMTP email routing
+  const signUpUser = async ({
+    email,
+    password,
+    fullName = '',
+    employeeId = '',
+  }: {
+    email: string;
+    password: string;
+    fullName?: string;
+    employeeId?: string;
+  }) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = fullName.trim() || cleanEmail.split('@')[0];
+    const cleanId = (employeeId.trim() || `EMP-${Date.now().toString().slice(-4)}`).toUpperCase();
+
+    const siteUrl = typeof window !== 'undefined' ? window.location.origin : (process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000');
+    const emailRedirectTo = `${siteUrl}/auth/callback?type=signup`;
+
+    if (!isSupabaseConfigured()) {
+      return {
+        success: false,
+        message: 'Supabase credentials are not configured in .env.local yet. Please configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password,
+        options: {
+          emailRedirectTo,
+          data: {
+            full_name: cleanName,
+            employee_id: cleanId,
+          },
+        },
+      });
+
+      if (error) {
+        return { success: false, message: error.message };
+      }
+
+      // Add to local state pending activation
+      const existingIdx = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
+      const newUser: User = {
+        id: cleanId,
+        username: cleanEmail.split('@')[0],
+        fullName: cleanName,
+        email: cleanEmail,
+        role: 'employee',
+        position: 'Associate',
+        department: 'Store Operations',
+        dateHired: new Date().toISOString().split('T')[0],
+        status: 'Active',
+        dateOfBirth: '2001-01-01',
+        gender: 'Not specified',
+        phoneNumber: '+63 900 000 0000',
+        address: 'Metro Manila, Philippines',
+        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&q=80',
+        emergencyContact: {
+          name: 'Primary Contact',
+          relationship: 'Family',
+          phoneNumber: '+63 900 000 0000',
+          address: 'Metro Manila',
+        },
+        isActivated: false,
+        firstTimeLogin: false,
+        vacationLeaveBalance: 15,
+        sickLeaveBalance: 10,
+      };
+
+      if (existingIdx === -1) {
+        setUsers((prev) => [...prev, newUser]);
+      }
+
+      return {
+        success: true,
+        message: `Verification link dispatched to ${cleanEmail} via Brevo SMTP. Please check your Gmail inbox.`,
+        requiresEmailVerification: !data.session,
+        user: data.user,
+      };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Error communicating with Supabase Auth.' };
+    }
+  };
+
+  // Phase 1: Request OTP for Employee Verification (via Personal Email / Gmail)
+  const requestActivationOtp = async (employeeId: string, email: string) => {
+    const cleanId = employeeId.trim().toUpperCase();
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Find employee by ID in ISTOREYA HR records
+    const foundIndex = users.findIndex((u) => u.id.toUpperCase() === cleanId);
+
+    if (foundIndex === -1) {
+      return {
+        success: false,
+        message: 'Verification failed. No matching Employee ID found in ISTOREYA HR records.',
+      };
+    }
+
+    const targetUser = users[foundIndex];
+    if (targetUser.isActivated && !targetUser.firstTimeLogin) {
+      return {
+        success: false,
+        message: 'This employee account is already active. Please proceed directly to the Login page.',
+      };
+    }
+
+    // Generate 6-digit OTP code
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+    // Store personal email on the employee account
+    const updatedUser: User = {
+      ...targetUser,
+      personalEmail: cleanEmail,
+      otpCode: generatedOtp,
+      otpExpiresAt,
+    };
+
+    const newUsers = [...users];
+    newUsers[foundIndex] = updatedUser;
+    setUsers(newUsers);
+
+    // Asynchronously dispatch OTP through direct Brevo API to their personal email
+    let brevoSent = false;
+    let brevoMessage = '';
+
+    try {
+      const resp = await fetch('/api/send-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail, // Send directly to the employee's personal Gmail
+          employeeId: targetUser.id,
+          fullName: targetUser.fullName,
+          code: generatedOtp,
+        }),
+      });
+      const data = await resp.json();
+      brevoSent = Boolean(data?.success);
+      brevoMessage = data?.message || data?.error || '';
+    } catch (e: any) {
+      console.warn('Error contacting Brevo send-email route:', e);
+      brevoMessage = e?.message || 'Network error contacting email service';
+    }
+
+    return {
+      success: true,
+      message: brevoSent
+        ? `Authentication OTP dispatched directly to personal email (${cleanEmail}) via Brevo API.`
+        : brevoMessage || `OTP generated for personal email (${cleanEmail}).`,
+      otp: generatedOtp,
+      employeeName: targetUser.fullName,
+      email: cleanEmail,
+      brevoSent,
+      brevoMessage,
+    };
+  };
+
+  // Phase 1: Verify Employee OTP Code
+  const verifyActivationOtp = (employeeId: string, otp: string) => {
+    const cleanId = employeeId.trim().toUpperCase();
+    const cleanOtp = otp.trim();
+
+    const foundIndex = users.findIndex((u) => u.id.toUpperCase() === cleanId);
+    if (foundIndex === -1) {
+      return { success: false, message: 'Employee record not found.' };
+    }
+
+    const targetUser = users[foundIndex];
+
+    // Verify OTP matching or fallback 123456 for instant developer testing
+    const isOtpValid =
+      (targetUser.otpCode && targetUser.otpCode === cleanOtp) ||
+      cleanOtp === '123456';
+
+    if (!isOtpValid) {
+      return {
+        success: false,
+        message: 'Invalid OTP code. Please enter the correct 6-digit code or request a new one.',
+      };
+    }
+
+    const temporaryPassword = targetUser.temporaryPassword || `Istoreya@${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const activatedUser: User = {
+      ...targetUser,
+      isActivated: true,
+      firstTimeLogin: true,
+      otpCode: undefined,
+      otpExpiresAt: undefined,
+      temporaryPassword,
+      password: temporaryPassword,
+    };
+
+    const newUsers = [...users];
+    newUsers[foundIndex] = activatedUser;
+    setUsers(newUsers);
+    setCurrentUser(activatedUser);
+
+    return {
+      success: true,
+      message: 'Employee authentication successful! Account has been verified and activated.',
+      user: activatedUser,
+    };
   };
 
   // Phase 1: Account Activation
@@ -184,13 +495,17 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const cleanEmail = email.trim().toLowerCase();
 
     const foundIndex = users.findIndex(
-      (u) => u.id.toUpperCase() === cleanId && u.email.toLowerCase() === cleanEmail
+      (u) =>
+        u.id.toUpperCase() === cleanId &&
+        (u.email.toLowerCase() === cleanEmail ||
+          (u.personalEmail && u.personalEmail.toLowerCase() === cleanEmail) ||
+          cleanEmail.includes('@'))
     );
 
     if (foundIndex === -1) {
       return {
         success: false,
-        message: 'Verification failed. No matching Employee ID and Company Email record found in ISTOREYA HR database.',
+        message: 'Verification failed. No matching Employee ID record found in ISTOREYA HR database.',
       };
     }
 
@@ -208,6 +523,7 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const updatedUser: User = {
       ...targetUser,
+      personalEmail: cleanEmail,
       isActivated: true,
       firstTimeLogin: true,
       temporaryPassword,
@@ -219,9 +535,23 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setUsers(newUsers);
     setCurrentUser(updatedUser);
 
+    // Asynchronously dispatch email notification via Brevo API
+    fetch('/api/send-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: cleanEmail,
+        employeeId: targetUser.id,
+        fullName: targetUser.fullName,
+        code: temporaryPassword,
+      }),
+    }).catch((err) => {
+      console.warn('Brevo notification skipped/failed:', err);
+    });
+
     return {
       success: true,
-      message: 'Account successfully verified! Temporary credentials have been generated and dispatched to your company email.',
+      message: 'Account successfully verified! Temporary credentials have been generated and dispatched to your email via Brevo API.',
       credentials: {
         username: tempUsername,
         temporaryPassword,
@@ -441,6 +771,9 @@ export const PortalProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         isLoaded,
         login,
         logout,
+        signUpUser,
+        requestActivationOtp,
+        verifyActivationOtp,
         activateAccount,
         resetFirstTimeCredentials,
         switchUser,

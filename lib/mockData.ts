@@ -137,6 +137,35 @@ export const INITIAL_USERS: User[] = [
     vacationLeaveBalance: 9,
     sickLeaveBalance: 7,
   },
+  {
+    id: 'EMP-2024-006',
+    username: 'aaron.tumaliuan',
+    password: 'password123',
+    fullName: 'Aaron Tumaliuan',
+    email: 'cariagasevero06@gmail.com',
+    personalEmail: 'cariagasevero06@gmail.com',
+    role: 'employee',
+    position: 'Operations & Systems Specialist',
+    department: 'Store Operations & IT',
+    dateHired: '2024-10-14',
+    status: 'Active',
+    dateOfBirth: '1998-05-15',
+    gender: 'Male',
+    phoneNumber: '+63 917 123 4567',
+    address: 'Makati City, Metro Manila',
+    avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=256&q=80',
+    emergencyContact: {
+      name: 'Family Contact',
+      relationship: 'Family',
+      phoneNumber: '+63 918 000 0000',
+      address: 'Metro Manila',
+    },
+    isActivated: false, // Ready for verification!
+    firstTimeLogin: true,
+    temporaryPassword: 'TempAaron2024!',
+    vacationLeaveBalance: 15,
+    sickLeaveBalance: 10,
+  },
 ];
 
 export const INITIAL_TASKS: Task[] = [

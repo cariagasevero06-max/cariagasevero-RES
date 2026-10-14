@@ -15,6 +15,7 @@ export interface User {
   password?: string;
   fullName: string;
   email: string;
+  personalEmail?: string;
   role: UserRole;
   position: string;
   department: string;
@@ -31,6 +32,8 @@ export interface User {
   temporaryPassword?: string;
   vacationLeaveBalance: number;
   sickLeaveBalance: number;
+  otpCode?: string;
+  otpExpiresAt?: number;
 }
 
 export type TaskPriority = 'High' | 'Medium' | 'Low';
