@@ -565,7 +565,23 @@ export const LoginScreen: React.FC<Props> = ({
                         ) : (
                           <span>
                             <strong>Brevo Notice:</strong>{' '}
-                            {brevoStatus.message || (
+                            {brevoStatus.message ? (
+                              brevoStatus.message.includes('https://') ? (
+                                <span>
+                                  {brevoStatus.message.split('https://')[0]}
+                                  <a
+                                    href={`https://${brevoStatus.message.split('https://')[1].trim()}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline font-semibold hover:text-amber-950 inline-flex items-center ml-1"
+                                  >
+                                    Authorize in Brevo &rarr;
+                                  </a>
+                                </span>
+                              ) : (
+                                brevoStatus.message
+                              )
+                            ) : (
                               <>
                                 To receive real emails in Gmail, enter your Brevo SMTP User &amp; Key in{' '}
                                 <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-[10px]">.env.local</code>.
